@@ -1,0 +1,37 @@
+# MPFNet v0.1 — 参考复现 · 简化监督版 (CA-I3D 主干)
+#
+# ⚠️ 重要：本配置非论文逐点复现，而是"简化监督近似"。
+#   - 论文为元学习 (support/query, N-way K-shot episode) 且依赖未公开预处理
+#     (VFI 帧插值 / FlowNet2.0 光流 / EVM 运动放大)，官方代码未释放。
+#   - 本近似仅实现 CA-I3D 3D 主干 + 3D 坐标注意力，作为单编码器监督分类，
+#     直接接入 trainer.py (标准 CrossEntropy/Focal)。
+#   - 输入用 rgb_triplet (9 通道三帧 RGB) 重塑为 [B,3,3,H,W]，
+#     替代论文未释放的 5 通道×10 帧对张量 ℱ。
+#
+# 论文报数(引用对照, 须标协议)：SDE Acc 0.811/0.924/0.857 (SMIC/CASME II/SAMM)；
+#                              CDE UF1 0.840 (MEGC2019-CD)。与本配置非同协议，不可直接比较。
+
+data:
+  image_size: 224                           # 输入空间尺寸 (由 run_main 覆盖为 224)
+  frame_type: "rgb_triplet"                 # 仅支持 rgb_triplet 作为 3D 主干输入
+  use_imagenet_norm: false                  # 3D 主干从零训练，不依赖 ImageNet 归一化
+
+# ==================== 训练配置 ====================
+train:
+  learning_rate*: 0.0005                    # * = 最优先；3D 主干从零训练，LR 高于预训练 2D 主干
+  warmup_epochs: 5                          # 5 轮 warmup
+  weight_decay: 0.0001                      # 权重衰减
+  epochs: 200                               # 配合 EarlyStopping
+
+# ==================== 模型配置 ====================
+model:
+  name: "MPFNet"
+  # ---- 3D 主干超参 ----
+  mpfnet:
+    dropout: 0.5                            # 3D 主干过拟合风险高，dropout 偏重
+    ca_reduction: 16                        # 坐标注意力通道缩减比
+    stem_ch: 64                             # stem 3D 卷积输出通道
+  # ---- 关闭可能影响 3D 输入的增强 (Mixup 在 batch 维做线性组合，对 3D 主干安全) ----
+  use_target: False
+
+# mixup 沿用 common.yml 默认 (alpha=0.2)，对 3D 主干同样安全

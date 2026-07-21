@@ -1,0 +1,111 @@
+# 微表情识别(MER)通用配置文件
+## 优先级：*>cmd>init>model.yml>common.yml，*结尾标记最优先
+# ==================== 实验基本信息 ====================
+base:
+  name:                                     # 实验名称, 默认：模型_数据集
+  seed: 1024                                # 随机种子
+  base_dir: "saved"                         # 输出根目录
+  # 检查点配置
+  checkpoint:
+    checkpoint_dir: "checkpoints"             # 检查点目录 # 默认在output_dir/{name}/目录下
+    save_best_only: True                      # 仅保存最佳模型
+    save_last: True                           # 保存最后一个epoch
+    resume: null                              # 恢复训练的检查点路径（null表示从头训练）
+
+# ==================== 数据配置 ====================
+data:
+  data_dir: "dataset"                       # 数据根目录
+  dataset: "casme2_7c"                      # 数据集：casme2_7c
+  cache:                                    # ---- 数据集缓存 ----
+    enabled: true                           # 是否启用磁盘缓存
+    refresh: false                          # true=强制重新扫描并覆盖缓存（数据集更新或逻辑变更时开启一次）
+  fixed_split: [0.8,0.2]                    # train: 0.8, test: 0.2
+  split_mode: "fixed"                       # fixed,5fold,loso
+  frame_type: "apex"                        # 帧类型: apex(单帧RGB), flow(光流onset→apex), rgb_triplet(三帧堆叠), rgb_flow(RGB+光流onset→apex), rgb_dual_flow(RGB+双向光流onset→apex+apex→offset)
+  frame_type_config:
+    apex:           { 'channels': 3, 'mode': 'single',     'description': '单帧RGB apex帧' }
+    flow:           { 'channels': 2, 'mode': 'single',     'description': 'onset→apex纯光流' }
+    rgb_triplet:    { 'channels': 9, 'mode': 'stacked',    'description': 'onset+apex+offset三帧通道堆叠' }
+    rgb_flow:       { 'channels': 5, 'mode': 'multimodal', 'is_multimodal': True, 'description': 'RGB apex + onset→apex光流(2-tuple)' }
+    rgb_dual_flow:  { 'channels': 7, 'mode': 'multimodal', 'is_multimodal': True, 'is_dual_flow': True, 'description': 'RGB apex + onset→apex光流 + apex→offset光流(3-tuple, 相位感知)' }
+  fold_idx:                                 # 0-4
+  test_subject:                             # test_subject: sub01
+  # 类别平衡配置
+  use_focal_loss: true                      # 是否使用 Focal Loss (推荐极度不平衡时开启)
+  focal_gamma: 2.0                          # Focal Loss gamma 参数
+  use_class_weight: true                    # 是否使用类别权重 (与Focal Loss配合使用效果更佳)
+#  annotation_data: "combined_3_class2_for_optical_flow.csv"  # 标注文件，默认为data_dir/{annotation_data}
+  batch_size: 64                            # 批次大小
+  num_classes: 3                            # 分类数量
+  image_size: 64                            # 输入图像尺寸，28/64/224，旧数据集是28*28，新数据集是224*224，但新数据集建议采用64*64轻量训练
+  num_workers: 8                            # 数据加载线程数
+  pin_memory: True                          # 锁定内存加速
+  # ---- 数据增强 (对小数据集至关重要) ----
+  augmentation:
+    enabled: true                           # 是否打开数据增强
+    horizontal_flip: true                   # 水平翻转 (面部对称, 安全)
+    rotation_degrees: 10                    # 随机旋转 ±10°
+    color_jitter: 0.1                       # 颜色抖动 (亮度/对比度)
+    random_erasing: 0.1                     # 随机擦除概率
+  mixup:
+    alpha: 0.2                              # Mixup Beta 分布参数 (0=关闭, 0.2=温和混合, 适配小数据集)
+
+# ==================== 模型配置 ====================
+model:
+  name:                                     # 模型名称
+  use_target: False                         # 是否使用目标
+
+# ==================== 训练配置 ====================
+train:
+  enabled: True                             # 是否训练
+  epochs: 200                               # 训练轮数
+  device: "cuda:0"                          # 设备配置
+  learning_rate: 0.00005                    # 学习率 (5e-5)
+  weight_decay: 0.0001                      # 权重衰减 (1e-4)
+  optimizer: "Adam"                         # 优化器类型
+  scheduler: "CosineAnnealing"              # 学习率调度器
+  warmup_epochs: 10                         # 预热轮数
+  gradient_clip: 1.0                        # 梯度裁剪
+  # 早停策略
+  early_stopping:
+    enabled: True                           # 是否启用早停
+    patience: 30                            # 容忍轮数
+
+# ==================== 评估/测试配置 ====================
+eval:
+  enabled: True                             # 是否测试
+  metrics: ["UF1", "UAR", "Accuracy"]       # 评估指标
+  confusion_matrix: True                    # 是否计算混淆矩阵
+  per_class_metrics: True                   # 是否计算每类指标
+
+# ==================== 交叉验证配置 ====================
+cross_val:
+  enabled: False                            # 是否启用交叉验证
+  method: "LOSO"                            # 交叉验证方法: LOSO/KFold
+  folds: 5                                  # K折交叉验证的K值
+  save_fold_results: True                   # 保存每折结果
+
+# ==================== 日志配置 ====================
+log:
+  level: "INFO"                             # 日志级别: DEBUG/INFO/WARNING/ERROR
+  log_dir: "log"                           # 日志目录
+  save_interval: 10                         # 保存间隔（每N个epoch）
+  print_interval: 10                        # 打印间隔（每N个batch）
+  # TensorBoard支持
+  tensorboard:
+    enabled: False                          # 是否启用TensorBoard
+    log_dir: "runs"                         # TensorBoard日志目录
+
+# ==================== 可视化配置 ====================
+visualization:
+  plot_training_curve: True                 # 绘制训练曲线
+  plot_confusion_matrix: True               # 绘制混淆矩阵
+  plot_per_class_accuracy: True             # 绘制每类准确率
+  save_figures: True                        # 保存图片
+  figure_dir: "figures"                     # 图片保存目录
+
+# ==================== 标识配置 ====================
+flag:
+  id: "0"                                   # ID，用于标识当前实验，每次都可以不一样
+  eval: "train"                             # 评估标识：训练
+  train_flag: "1"                           # 训练标记，用于标识当前实验所属批次

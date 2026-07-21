@@ -1,0 +1,9 @@
+# AlexNet 模型配置
+# 经典CNN架构，基于ImageNet预训练
+
+model:
+  name: "AlexNet"                    # 模型名称（必须）
+  pretrained: True                   # 是否加载ImageNet预训练权重
+
+#data:
+#  batch_size*: 512                   # 批次大小，*结尾：最优先

@@ -1,0 +1,51 @@
+# BPTNet v0.6 — Phase-Aware Temporal Attention Network
+#
+# 核心创新:
+#   1. FiLMFusion — 特征线性调制替代 Cross-Attention，避免异构特征空间对齐问题
+#   2. CBAM — 轻量空间注意力，flow 模态关闭通道注意力保护运动模式
+#   3. DropPath — 随机深度正则化，正确包裹每个残差分支
+#   4. Mixup — batch-level 数据增强，缓解极小数集过拟合
+#
+# 架构: ResNet18 → CBAM(按需) → [FiLMFusion] → Post-Norm TransformerBlock (DropPath) → Head
+#
+# v0.6 改动:
+#   - FiLMFusion 替代 PhaseCrossAttention (修复 rgb_flow/dual_flow 融合退化)
+#   - flow-CBAM 关闭通道注意力 (保护光流运动模式)
+#   - DropPath rate 从 0.1→0.15
+#   - 新增 Mixup (alpha=0.2)
+#   - 5fold 加入默认训练协议
+#
+# 版本历史:
+#   v0.2 → his/bptnet_v0.2.py  (原层次化Transformer版)
+#   v0.3 → his/bptnet_v0.3.py  (ResNet18 + 简单相加融合版)
+#   v0.4 → his/bptnet_v0.4.1.py  (PhaseCrossAttention + CBAM + DropPath, 有bug)
+#   v0.5 → his/bptnet_v0.5.py  (修复 DropPath/Post-Norm + gate正偏置 + apex跳CBAM)
+#   v0.6 → 当前版本              (FiLM + flow-CBAMfix + Mixup + 5fold)
+
+data:
+  image_size: 224                           # ResNet18 预训练尺寸
+  use_imagenet_norm: true                   # 对齐 ImageNet 预训练归一化
+
+# ==================== 训练配置 ====================
+train:
+  learning_rate*: 0.0003                     # 3e-4，高LR是唯一正因子
+  warmup_epochs: 5                          # 5轮 warmup
+  weight_decay: 0.0001                      # 权重衰减
+
+# ==================== 模型配置 ====================
+model:
+  name: "BPTNet"
+  # ---- Backbone ----
+  backbone: "resnet18"
+  pretrained: true
+  # ---- Transformer ----
+  transformer_layers: 2                     # 2层轻量 Transformer
+  transformer_heads: 8                      # 注意力头数
+  transformer_dim: 512                      # Transformer 特征维度
+  # ---- 正则化 ----
+  dropout: 0.15                             # Attention + FF dropout
+  drop_path_rate: 0.15                      # 随机深度 (Run1原值，2层Transformer轻量正则)
+  # ---- 注意力模块 (v0.4 新增) ----
+  use_cbam: true                            # CBAM 空间注意力 (flow 关闭通道注意力)
+  # ---- 多模态融合策略 (v0.6: FiLM 替代 Cross-Attention) ----
+  phase_fusion: "film"                      # "film" → FiLM 通道调制 (推荐，稳定); "cross_attention" → Cross-Attn; "sum" → 简单求和

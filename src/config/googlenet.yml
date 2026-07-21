@@ -1,0 +1,10 @@
+# GoogLeNet 模型配置
+# Inception架构，基于ImageNet预训练
+
+model:
+  name: "GoogLeNet"                   # 模型名称（必须）
+  pretrained: True                    # 是否加载ImageNet预训练权重
+  aux_logits: True                    # 是否使用辅助分类器（训练时有帮助）
+
+data:
+  batch_size*: 256                    # 批次大小，*结尾标记最优先

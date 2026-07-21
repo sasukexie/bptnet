@@ -1,0 +1,17 @@
+# LongShortActionFuseNet 模型独有配置
+# 基于EDMDBN的长短时动作融合网络
+# 注意：公共参数已在 common.yml 中定义，此处仅定义模型特有参数
+
+data:
+  batch_size*: 64                            # 批次大小
+
+# ==================== 模型独有配置 ====================
+model:
+  name: "LongShortActionFuseNet"              # 模型名称（必须）
+  # 特有参数
+  use_long_action: True                       # 是否使用长时动作
+  use_short_action: False                     # 是否使用短时动作
+  use_feature_concat: False                   # 是否使用特征拼接（否则使用加法）
+  embed_dim: 128                              # 嵌入维度
+  depth: 3                                    # 网络深度
+  backbone_type: 'cnn'                        # 'swin_2d' or 'cnn'

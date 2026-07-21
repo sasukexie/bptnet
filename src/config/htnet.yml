@@ -1,0 +1,17 @@
+# HTNet 模型独有配置
+# Hierarchical Transformer Network for Micro-Expression Recognition
+# 注意：公共参数已在 common.yml 中定义，此处仅定义模型特有参数
+
+# ==================== 模型独有配置 ====================
+model:
+  name: "HTNet"                             # 模型名称（必须）
+  # 特有参数
+  patch_size: 8                             # Patch大小
+  dim: 256                                  # 特征维度
+  heads: 3                                  # 注意力头数
+  num_hierarchies: 3                        # 层级数量
+  block_repeats: [2, 2, 10]                 # 各层Transformer块重复次数
+  dropout: 0.0                              # Dropout概率
+
+data:
+  batch_size*: 512                          # 批次大小，*结尾：最优先

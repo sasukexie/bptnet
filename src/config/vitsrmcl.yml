@@ -1,0 +1,37 @@
+# VITSRMCL 模型独有配置
+# 完整的SRMCL实现，包含MAE + Cluster Memory + Contrastive Learning
+# 注意：公共参数已在 common.yml 中定义，此处仅定义模型特有参数
+
+# ==================== 模型独有配置 ====================
+model:
+  name: "VITSRMCL"                            # 模型名称（必须）
+  use_target: true                            # 是否在前向传播中传递target（必需，用于计算多任务损失）
+  
+  # ===== MAE Backbone 参数 =====
+  patch_size: 4                               # Patch大小
+  embed_dim: 256                              # Encoder嵌入维度
+  depth: 6                                    # Encoder层数
+  num_heads: 8                                # Encoder注意力头数
+  mlp_ratio: 4.0                              # MLP扩展比例
+  
+  # Decoder参数（MAE重构）
+  decoder_embed_dim: 128                      # Decoder嵌入维度
+  decoder_depth: 4                            # Decoder层数
+  decoder_num_heads: 8                        # Decoder注意力头数
+  
+  # 掩码参数
+  mask_ratio: 0.0                             # 掩码比例（0=纯分类, 0.75=MAE预训练）
+  norm_pix_loss: false                        # 是否使用归一化像素损失
+  
+  # ===== Cluster Memory 参数 =====
+  use_memory: true                            # 是否使用记忆模块
+  memory_momentum: 0.1                        # 记忆动量更新系数
+  memory_temp: 0.1                            # 对比学习温度系数（原 0.05 过低导致 logits 过于尖锐）
+  use_hard: false                             # 是否使用硬样本更新
+  
+  # ===== 损失权重 =====
+  alpha: 0.5                                  # 重构损失权重
+  beta: 0.5                                   # 记忆损失权重
+
+data:
+  batch_size*: 48                             # 批次大小，*结尾：最优先
