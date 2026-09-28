@@ -1,51 +1,87 @@
-# BPTNet v0.6 — Phase-Aware Temporal Attention Network
+# BPTNet — Phase-Aware Temporal Attention Network
+#
+# 本配置是手稿《Bidirectional Phase-aware Transformer Network for Micro-Expression
+# Recognition》(The Visual Computer, 第一轮回稿) 的**实验协议快照**：
+# 所有超参与手稿 §3.5 / §3.6 / §3.6.4 逐项对齐，注释与手稿同源，
+# 确保代码实现与论文中描述的协议一致。
+#
+# 手稿对应关系:
+#   §3.5   Transformer: Post-Norm, L = 6 层, h = 4 头, C = 512
+#   §3.6.1 Focal Loss: γ = 2 + 逆类别频率权重
+#   §3.6.2 DropPath: p_drop = 0.1（layer-independent）
+#   §3.6.3 Mixup: α = 1.0
+#   §3.6.4 输入 64×64; ResNet-18(ImageNet, 端到端微调); GatedSumFusion r = 4 + 零初始化;
+#          增强仅随机水平翻转; Adam lr = 1e-4, wd = 1e-4, batch = 16; 40 epochs + ReduceLROnPlateau
+#
+# [!] 与首轮手稿 §3.6.4 的**唯一有意偏离**：输入 224 → 64。
+#     依据: 224 下同分布诊断显示 val UF1 在第 20 轮见顶后持续下滑、train_acc 仍升至
+#     0.77（过拟合）；64 使 patch token 数 49 → 4。
+#     >>> 论文 §3.6.4 应与此处保持一致。
+#     其余各项（端到端微调 / Mixup α / 40 epochs / ReduceLROnPlateau）均与手稿一致——
+#     其中"端到端微调"曾被一度改成冻结骨干，实测反而低 0.058，已改回（见 model.freeze_backbone）。
 #
 # 核心创新:
-#   1. FiLMFusion — 特征线性调制替代 Cross-Attention，避免异构特征空间对齐问题
+#   1. GatedSumFusion — 各模态先 per-location LayerNorm 对齐尺度、再门控加权求和
 #   2. CBAM — 轻量空间注意力，flow 模态关闭通道注意力保护运动模式
 #   3. DropPath — 随机深度正则化，正确包裹每个残差分支
-#   4. Mixup — batch-level 数据增强，缓解极小数集过拟合
-#
-# 架构: ResNet18 → CBAM(按需) → [FiLMFusion] → Post-Norm TransformerBlock (DropPath) → Head
-#
-# v0.6 改动:
-#   - FiLMFusion 替代 PhaseCrossAttention (修复 rgb_flow/dual_flow 融合退化)
-#   - flow-CBAM 关闭通道注意力 (保护光流运动模式)
-#   - DropPath rate 从 0.1→0.15
-#   - 新增 Mixup (alpha=0.2)
-#   - 5fold 加入默认训练协议
+#   4. Mixup — 数据混合增强，缓解极小数集过拟合
 #
 # 版本历史:
-#   v0.2 → his/bptnet_v0.2.py  (原层次化Transformer版)
-#   v0.3 → his/bptnet_v0.3.py  (ResNet18 + 简单相加融合版)
-#   v0.4 → his/bptnet_v0.4.1.py  (PhaseCrossAttention + CBAM + DropPath, 有bug)
-#   v0.5 → his/bptnet_v0.5.py  (修复 DropPath/Post-Norm + gate正偏置 + apex跳CBAM)
-#   v0.6 → 当前版本              (FiLM + flow-CBAMfix + Mixup + 5fold)
+#   v0.4 → PhaseCrossAttention + CBAM + DropPath
+#   v0.5 → 修正 DropPath/Post-Norm；gate 正偏置；apex 分支跳过 CBAM
+#   v0.6 → FiLM 替代 CrossAttn；flow-CBAM 去通道注意力；Mixup
+#   v0.7                        (Phase-Token Temporal Attention: 相位全局 token + 可学习相位位置编码)
+#   v0.8 → 当前版本             (GatedSumFusion 替代 FiLM，修复多模态尺度坍缩；
+#                                配置与手稿 §3.6.4 协议逐项对齐)
 
 data:
-  image_size: 224                           # ResNet18 预训练尺寸
+  image_size: 64                            # [!] 首轮手稿写 224；实测 224 在 ~200 样本下
+                                            #   严重过拟合，改 64（patch token 49→4）。
+                                            #   手稿 §3.6.4 需同步修订。
   use_imagenet_norm: true                   # 对齐 ImageNet 预训练归一化
 
 # ==================== 训练配置 ====================
 train:
-  learning_rate*: 0.0003                     # 3e-4，高LR是唯一正因子
-  warmup_epochs: 5                          # 5轮 warmup
-  weight_decay: 0.0001                      # 权重衰减
+  learning_rate*: 0.0001                    # Adam lr = 1e-4（手稿 §3.6.4）
+  warmup_epochs: 0                          # 手稿只声明 ReduceLROnPlateau，无 warmup
+  weight_decay: 0.0001                      # weight decay = 1e-4（手稿 §3.6.4）
+  scheduler: "ReduceLROnPlateau"            # 手稿 §3.6.4
+  plateau:
+    factor: 0.5                             # 平台期 LR 衰减系数
+    patience: 5                             # 平台期容忍轮数（监控 val UF1，mode=max）
 
 # ==================== 模型配置 ====================
 model:
   name: "BPTNet"
   # ---- Backbone ----
   backbone: "resnet18"
-  pretrained: true
+  pretrained: true                          # ImageNet 预训练权重
+  freeze_backbone: false                    # 手稿 §3.6.4 声明的"端到端微调"（已实测验证正确）。
+                                            # 逐折消融（casme2_3c_ee / flow / 26 折 LOSO）:
+                                            #   冻结骨干   UF1 0.4033 / UAR 0.4152 / Acc 0.6919
+                                            #   端到端微调 UF1 0.4615 / UAR 0.4625 / Acc 0.7762
+                                            # → 冻结反而低 0.058。
+                                            # 原因: 冻结的 ImageNet 特征是**强绑定身份/外观**的
+                                            #   语义特征，梯度无法改变它，模型只能靠"记住受试者"
+                                            #   来拟合，跨被试随即失效。放开微调后梯度才能把特征
+                                            #   从"认人"扭向"认表情"。
+                                            # 同时实测"容量过剩"假设**不成立**: 把 Transformer
+                                            #   从 6层/512维 削到 2层/256维（19.55M→1.72M）反而
+                                            #   掉 0.078；epochs 40→150 掉 0.097。
+                                            #   → 参数多不是病，特征不对才是病。
+  separate_backbone: true                   # 手稿 §2.5: RGB 与光流使用两个独立骨干。
+                                            # 共享骨干会让两者 BatchNorm 统计互相污染，
+                                            # 导致多模态分支类别坍缩（实测 UAR=1/num_classes）。
   # ---- Transformer ----
-  transformer_layers: 2                     # 2层轻量 Transformer
-  transformer_heads: 8                      # 注意力头数
-  transformer_dim: 512                      # Transformer 特征维度
+  transformer_layers: 6                     # L = 6（手稿 §3.5 式(7) / §3.6.4）
+  transformer_heads: 4                      # h = 4（手稿 §3.6.4）
+  transformer_dim: 512                      # C = 512（手稿 §3.6.4）
   # ---- 正则化 ----
-  dropout: 0.15                             # Attention + FF dropout
-  drop_path_rate: 0.15                      # 随机深度 (Run1原值，2层Transformer轻量正则)
-  # ---- 注意力模块 (v0.4 新增) ----
+  dropout: 0.1                              # Attention + FF dropout
+  drop_path_rate: 0.1                       # 手稿 §3.6.2: p_drop = 0.1
+  drop_path_mode: "uniform"                 # "uniform"=每层同一概率(手稿 §3.6.2)
+                                            # "linear" =按层线性递增(历史实现 0→p)
+  # ---- 注意力模块 ----
   use_cbam: true                            # CBAM 空间注意力 (flow 关闭通道注意力)
-  # ---- 多模态融合策略 (v0.6: FiLM 替代 Cross-Attention) ----
-  phase_fusion: "film"                      # "film" → FiLM 通道调制 (推荐，稳定); "cross_attention" → Cross-Attn; "sum" → 简单求和
+  # ---- 多模态融合（手稿 §3.6.4: GatedSumFusion, r = 4, 门控 MLP 零初始化）----
+  phase_fusion: "gated_sum"                 # "gated_sum"(手稿) / "film" / "cross_attention" / "sum"

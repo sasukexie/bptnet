@@ -3,7 +3,7 @@
 # ==================== 实验基本信息 ====================
 base:
   name:                                     # 实验名称, 默认：模型_数据集
-  seed: 1024                                # 随机种子
+  seed: 1024                                # 随机种子（手稿主结果 seeds: 1024/2048/4096）
   base_dir: "saved"                         # 输出根目录
   # 检查点配置
   checkpoint:
@@ -11,10 +11,17 @@ base:
     save_best_only: True                      # 仅保存最佳模型
     save_last: True                           # 保存最后一个epoch
     resume: null                              # 恢复训练的检查点路径（null表示从头训练）
+    keep_folds: False                         # 每折另存 fold_<折号>_<被试>.pth。
+                                              # LOSO 一个 run 内逐折都写同一个 best_model.pth
+                                              # → 默认只留最后一折的权重；开启后**多种子集成**
+                                              # 才有前提（每折保存的权重体积约 120MB/折，
+                                              # 24 折约 2.9GB，注意磁盘）。默认关闭。
+                                              # [!] 该段需经 run_main.py 的子键级注入才可被
+                                              #     BPTNET_CFG 覆盖（见 run_main.py 的说明）。
 
 # ==================== 数据配置 ====================
 data:
-  data_dir: "dataset"                       # 数据根目录
+  data_dir: "dataset"                       # 数据根目录（相对 mer/ 工作区根，即 mer/dataset，多个模型共用以节省空间）
   dataset: "casme2_7c"                      # 数据集：casme2_7c
   cache:                                    # ---- 数据集缓存 ----
     enabled: true                           # 是否启用磁盘缓存
@@ -31,24 +38,43 @@ data:
   fold_idx:                                 # 0-4
   test_subject:                             # test_subject: sub01
   # 类别平衡配置
-  use_focal_loss: true                      # 是否使用 Focal Loss (推荐极度不平衡时开启)
-  focal_gamma: 2.0                          # Focal Loss gamma 参数
-  use_class_weight: true                    # 是否使用类别权重 (与Focal Loss配合使用效果更佳)
+  # [!] 2026-09-27 改为 false：手稿 §3.6.1 明确"所有报告数字用 class-weighted CE"，
+  #     且主表所有跑批（p21/p23 系列）都显式覆盖 use_focal_loss=false
+  #     （实测 focal 在 146 样本上是负资产：megc128 focal 0.7885 vs 关 focal 0.8083）。
+  #     若要用 focal，请显式覆盖 {"data":{"use_focal_loss":true}}。
+  use_focal_loss: false                     # 手稿 §3.6.1: 报告结果用 class-weighted CE
+  focal_gamma: 2.0                          # 仅当 use_focal_loss=true 生效（开发期探索项）
+  use_class_weight: true                    # 手稿 §3.6.1: 逆类别频率权重（与 CE 搭配）
 #  annotation_data: "combined_3_class2_for_optical_flow.csv"  # 标注文件，默认为data_dir/{annotation_data}
-  batch_size: 64                            # 批次大小
+  batch_size: 16                            # 手稿 §3.6.4: batch size = 16
   num_classes: 3                            # 分类数量
-  image_size: 64                            # 输入图像尺寸，28/64/224，旧数据集是28*28，新数据集是224*224，但新数据集建议采用64*64轻量训练
-  num_workers: 8                            # 数据加载线程数
+  image_size: 64                            # [!] 首轮手稿 §3.6.4 写 224；实测在 ~200 样本下
+                                            #   严重过拟合，改 64。手稿需同步修订。
+  num_workers: 4                            # 数据加载线程数（配合 persistent_workers=True，
+                                            #   进程内图像/光流缓存不会每 epoch 失效）
   pin_memory: True                          # 锁定内存加速
-  # ---- 数据增强 (对小数据集至关重要) ----
+  # ---- 模型选择协议 ----
+  # stratified: 从训练被试内部按类别分层抽 val（推荐）
+  #   - 单被试 val 只有 ~10 个样本且类别高度不均（实测 Val Acc=1.0 而 UF1=0.333）
+  #   - 多被试 val 会把训练数据砍掉约 30%，对小数据集代价过大
+  #   - 分层抽样保证 val 的类别比例与全集一致；测试被试始终完全隔离
+  val_mode: "stratified"
+  val_ratio: 0.2                            # val 占训练池的比例（仅 stratified 模式生效）
+  # inner_subject 模式参数（保留备用）
+  num_val_subjects: 5                       # 每折留作验证的被试数
+  # ---- 数据增强 ----
+  # 手稿 §3.6.4 只声明 "Random horizontal flip"；其余增强关闭以对齐手稿，
+  # 如需恢复强增强，请同步修改手稿 §3.6.4 的描述。
   augmentation:
     enabled: true                           # 是否打开数据增强
-    horizontal_flip: true                   # 水平翻转 (面部对称, 安全)
-    rotation_degrees: 10                    # 随机旋转 ±10°
-    color_jitter: 0.1                       # 颜色抖动 (亮度/对比度)
-    random_erasing: 0.1                     # 随机擦除概率
+    horizontal_flip: true                   # 随机水平翻转（手稿 §3.6.4）
+    rotation_degrees: 0                     # 随机旋转（手稿未声明 → 关闭）
+    color_jitter: 0.0                       # 颜色抖动（手稿未声明 → 关闭）
+    random_erasing: 0.0                     # 随机擦除（手稿未声明 → 关闭）
   mixup:
-    alpha: 0.2                              # Mixup Beta 分布参数 (0=关闭, 0.2=温和混合, 适配小数据集)
+    alpha: 0.3                              # [!] 首轮手稿 §3.6.3 写 1.0；α=1.0 在 ~200 样本下
+                                            #   混合过强（标签近乎随机化），改 0.3。
+                                            #   手稿需同步修订。
 
 # ==================== 模型配置 ====================
 model:
@@ -58,18 +84,22 @@ model:
 # ==================== 训练配置 ====================
 train:
   enabled: True                             # 是否训练
-  epochs: 200                               # 训练轮数
+  epochs: 40                                # 手稿 §3.6.4: 40 epochs
   device: "cuda:0"                          # 设备配置
-  learning_rate: 0.00005                    # 学习率 (5e-5)
-  weight_decay: 0.0001                      # 权重衰减 (1e-4)
-  optimizer: "Adam"                         # 优化器类型
-  scheduler: "CosineAnnealing"              # 学习率调度器
-  warmup_epochs: 10                         # 预热轮数
+  learning_rate: 0.0001                     # 手稿 §3.6.4: lr = 1e-4（bptnet.yml 带 * 者优先）
+  weight_decay: 0.0001                      # 手稿 §3.6.4: weight decay = 1e-4
+  optimizer: "Adam"                         # 手稿 §3.6.4: Adam
+  scheduler: "ReduceLROnPlateau"            # 手稿 §3.6.4
+  warmup_epochs: 0                          # 手稿只声明 ReduceLROnPlateau，无 warmup
   gradient_clip: 1.0                        # 梯度裁剪
-  # 早停策略
+  # 早停策略（基于折内验证集 val UF1）
+  # 手稿 §3.6.4: "For each fold, T = 40 epochs are run and the best validation
+  # UF1 is recorded" → 跑满 40 epochs，再由 val UF1 选 best epoch 的权重。
+  # val 只有几十个样本，开启早停会导致训练过早终止（实测 best 在 epoch 4、
+  # 却在 epoch 14 早停），故按手稿关闭早停。
   early_stopping:
-    enabled: True                           # 是否启用早停
-    patience: 30                            # 容忍轮数
+    enabled: False                          # 关闭早停：跑满 epochs（手稿 T = 40）
+    patience: 10                            # 容忍轮数（仅在 enabled=True 时生效）
 
 # ==================== 评估/测试配置 ====================
 eval:

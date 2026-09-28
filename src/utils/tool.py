@@ -4,7 +4,6 @@ import psutil
 import setproctitle
 import torch
 from src.data.dataset import get_all_subjects, MEDataset
-from src.trainer import Trainer
 from src.utils.config import ConfigManager
 from src.utils.logger import setup_logger, create_timestamped_log
 from torchvision import transforms

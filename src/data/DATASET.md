@@ -355,7 +355,7 @@ loader = create_dataloaders(config)
 | casme | **3c** | **4c** | 8c | 8c样本仅186且不均衡比66:1，8类几乎不可能收敛；4c/3c可对齐casme2做联合对比 |
 | casme_sq | **3c** | 4c | 8c | 仅53个样本，8类每类不足10个，4类勉强可行，3类是唯一合理选择 |
 
-> **核心原则**: 3类是跨数据集/跨论文的通用协议，5类是 CASME II 专属主流标准，4类是原作者推荐且比5类更均衡。不要自己造合并规则——审稿人懂 FACS。
+> **核心原则**: 3类是跨数据集/跨论文的通用协议，5类是 CASME II 专属主流标准，4类是原作者推荐且比5类更均衡。不要自行发明合并规则——FACS 体系下的约定是领域共识。
 
 #### 使用方法
 
@@ -396,8 +396,8 @@ label = self.labels[idx]   # 不是 sample["label"]
 | 数据集          | 类别数 | 标签范围 | 备注 |
 |--------------|:---:|:------|------|
 | casme2 (旧)   | 3   | 0-2 | legacy baseline |
-| casme2_7c    | 7   | 0-6 | 见 `zone/pre_data/1_README.md` §4.1 |
-| casme_8c     | 8   | 0-7 | 见 `zone/pre_data/1_README.md` §4.2 |
+| casme2_7c    | 7   | 0-6 | 见数据准备说明 §4.1 |
+| casme_8c     | 8   | 0-7 | 见数据准备说明 §4.2 |
 | casme_sq_8c  | 8   | 0-7 | 微表情过滤后实际 8 类 |
 | casme_sq_10c | 10  | 0-9 | 放开宏表情过滤后（暂无数据） |
 
@@ -420,13 +420,14 @@ data:
 
 ### Q1: 找不到数据目录
 ```
-FileNotFoundError: 数据目录不存在: dataset/casme2_7c
+FileNotFoundError: 数据集必须是 rich 格式 (包含 rgb/ 或 flow/ 子目录): <workspace>/dataset/casme2_7c
 ```
 
 **解决**：
-1. 确认已运行 `zone/pre_data/1_extract_dataset.py` 生成数据集
-2. 检查 `data.frame_type` 是否有效（`apex` / `flow` / `rgb_triplet` / `rgb_flow` / `rgb_dual_flow`）
-3. 确认 `data.dataset` 名称拼写正确
+1. 共享数据集位于工作区根目录 `mer/dataset/`（多个模型共用，已相对 `mer/` 解析，见 `common.yml` 的 `data.data_dir` 与 `config.py` 的 `workspace_root`）。确认 `mer/dataset/casme2_7c/{rgb,flow,flow_ao}` 存在
+2. 数据由仓库外的预处理脚本一次性提取成 rich 格式；输出目录应指向 `<data-root>/`
+3. 检查 `data.frame_type` 是否有效（`apex` / `flow` / `rgb_triplet` / `rgb_flow` / `rgb_dual_flow`）
+4. 确认 `data.dataset` 名称拼写正确
 4. 丰富格式需存在 `rgb/` 或 `flow/` 子目录
 
 ### Q2: 加载了0个样本

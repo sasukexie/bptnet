@@ -66,5 +66,14 @@ htmlcov/
 #zone/other/
 zone/test/
 
+shape_predictor_68_face_landmarks.dat
 *-eps-converted-to.pdf
 output/
+dataset/
+_main.abs
+_main.aux
+_main.bbl
+_main.blg
+_main.log
+_main.out
+_main.pdf

@@ -26,24 +26,12 @@ frame_type 支持：
   - rgb_flow:     RGB + 光流 → 双路ResNet18+CBAM → FiLMFusion 融合 → Transformer → Head
   - rgb_dual_flow: RGB + 双向光流 → 三路ResNet18+CBAM → FiLMFusion 融合 → Transformer → Head
 
-版本历史：
-  v0.2 → his/bptnet_v0.2.py  (原 BPTNet + BPTNetv2 双类版)
-  v0.3 → his/bptnet_v0.3.py  (ResNet18 + 简单相加融合, Post-Norm Transformer)
-  v0.4 → his/bptnet_v0.4.1.py  (PhaseCrossAttention + CBAM + DropPath, 有bug)
-  v0.5 → his/bptnet_v0.5.py  (修复 DropPath/Post-Norm + gate正偏置 + apex跳CBAM)
-  v0.6 → his/bptnet_v0.6.py    (FiLMFusion 替代 CrossAttn; flow-CBAM 去通道注意力;
-                                 Mixup 增强; 5fold 训练协议; DropPath rate ↑0.15)
-  v0.7 → 当前版本              (新增 Phase-Token Temporal Attention：相位全局 token
-                                 + 可学习相位位置编码，CLS 跨相位时序自注意力；统一 1/2/3 相位；
-                                 rgb_triplet 由"三帧平均"升级为"三相位 token"，不再丢弃相位结构)
-  v0.8 → 当前修复              (多模态根因修复：融合前 per-location LayerNorm 对齐
-                                 RGB/光流尺度，消除类别坍缩；GatedSumFusion 替代 FiLM
-                                 ＝保留 flow 空间内容、dual_flow 为 flow 超集；
-                                 phase_fusion='gated_sum')
 """
 
 import torch
 from torch import nn
+
+from src.utils.logger import logger
 
 
 # ------------------------------------------------------------------
@@ -220,7 +208,7 @@ class PhaseCrossAttention(nn.Module):
         gate_dim = dim * (num_phases + 1)  # RGB + 各相位特征
         gate_final = nn.Linear(dim // 4, 1)
         # 正偏置 → 初始 gate≈0.73，保证相位融合路径在训练初期有足够梯度
-        # （v0.5 设计意图；此前被 -2.0 覆盖导致 gate≈0.12、近似关闭融合，属 bug）
+        # （正偏置使初始 gate≈0.73，保证相位融合路径在训练初期有足够梯度）
         nn.init.constant_(gate_final.bias, 1.0)
         self.gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
@@ -463,19 +451,44 @@ class BPTNet(nn.Module):
         phase_fusion = model_config.get('phase_fusion', 'cross_attention')
 
         # ==================== Backbone ====================
+        # ---- SSL 权重注入（仅 flow 单模态）----
+        # 该 checkpoint 为可选的领域自监督（SSL）权重；不提供时使用 ImageNet 初始化（论文报告的数字均为 ImageNet 初始化）
+        # （2972 个光流样本；输入 [u,v,u] + 与训练完全相同的归一化）。
+        # 只对 flow 单模态生效，避免误注入到 RGB 分支（两者分布完全不同）。
+        flow_ssl_ckpt = model_config.get('flow_ssl_ckpt', None) if ft == 'flow' else None
+
         if backbone_type == 'resnet18':
-            backbone, out_channels = self._build_resnet18(pretrained)
+            backbone, out_channels = self._build_resnet18(pretrained, flow_ssl_ckpt)
         else:
             raise ValueError(f"Unsupported backbone: {backbone_type}")
 
         self.backbone = backbone
         self.backbone_out_channels = out_channels
 
+        # ---- 模态独立骨干（手稿 §2.5: "RGB appearance and optical flow come from
+        #      two independent backbones and reside in heterogeneous embedding spaces"）
+        # 实测根因：RGB（自然图像，ImageNet 统计）与光流（帧差图，分布迥异）若共享
+        # 同一个 ResNet18，两者的 BatchNorm running statistics 会互相污染——即使 RGB
+        # 支路的输出被丢弃，其前向仍会更新 BN 统计，使光流特征被破坏，多模态分支
+        # 类别坍缩（UAR 恒等于 1/num_classes，不同 fold 逐位相同）。
+        # 分离骨干后两者统计彻底隔离，同时与手稿"两个独立骨干"的描述一致。
+        self.separate_backbone = model_config.get('separate_backbone', False)
+        # 光流 → 3 通道的构造方式（见 _to_rgb_input）: "dup"(历史) / "uvmag"
+        self.flow_3ch = model_config.get('flow_3ch', 'dup')
+        self.backbone_rgb = None
+        self.proj_rgb = None
+        if self.separate_backbone and self.is_multimodal:
+            self.backbone_rgb, _ = self._build_resnet18(pretrained)
+
         # 投影到 transformer 维度
         if out_channels != transformer_dim:
             self.proj = nn.Conv2d(out_channels, transformer_dim, 1)
+            if self.backbone_rgb is not None:
+                self.proj_rgb = nn.Conv2d(out_channels, transformer_dim, 1)
         else:
             self.proj = nn.Identity()
+            if self.backbone_rgb is not None:
+                self.proj_rgb = nn.Identity()
 
         # ==================== CBAM 注意力 ====================
         fmap_size = image_size // 32
@@ -569,8 +582,14 @@ class BPTNet(nn.Module):
         self.phase_feats_source = model_config.get('phase_feats_source', 'all')
 
         # ==================== Transformer (Post-Norm + 正确 DropPath) ====================
-        drop_rates = [drop_path_rate * i / max(transformer_layers - 1, 1)
-                      for i in range(transformer_layers)]
+        # 手稿 §3.6.2: "layer-independent probability p_drop = 0.1" → uniform
+        # 历史实现为按层线性递增 0→p（第 1 层无 dropout），保留为对照开关
+        drop_path_mode = model_config.get('drop_path_mode', 'uniform')
+        if drop_path_mode == 'uniform':
+            drop_rates = [drop_path_rate] * transformer_layers
+        else:
+            drop_rates = [drop_path_rate * i / max(transformer_layers - 1, 1)
+                          for i in range(transformer_layers)]
 
         self.transformer_blocks = nn.ModuleList()
         for i in range(transformer_layers):
@@ -590,15 +609,82 @@ class BPTNet(nn.Module):
         # 初始化非预训练权重
         self._init_weights()
 
+        # ==================== 骨干冻结（小样本抗过拟合）====================
+        # 背景：CASME II 3c 严格 LOSO 下训练样本仅 ~120-230 个，而 ResNet18 +
+        #   Transformer 的可训练参数达 30-42M。同分布（同被试内随机划分样本）诊断
+        #   显示 val UF1 在第 20 轮见顶后持续下滑、train_acc 仍升至 0.77 —— 典型
+        #   过拟合；把 epoch 从 40 加到 150 反而更差。
+        # 冻结 ImageNet 预训练骨干后，可训练自由度主要落在 Transformer 与分类头，
+        #   是 MER 小样本的常见做法。
+        # 关键细节：冻结时骨干必须保持 eval()。否则 BatchNorm 的 running stats 仍会
+        #   被更新，等于"权重冻结了、特征分布却仍在漂移"，冻结效果大打折扣。
+        #   故下方重写 train()。
+        self.freeze_backbone = model_config.get('freeze_backbone', False)
+        self._frozen_tensors = 0
+        if self.freeze_backbone:
+            for module in (self.backbone, self.backbone_rgb):
+                if module is None:
+                    continue
+                for p in module.parameters():
+                    p.requires_grad = False
+                    self._frozen_tensors += 1
+            n_train = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            n_all = sum(p.numel() for p in self.parameters())
+            logger.info(
+                f"骨干已冻结: {self._frozen_tensors} 个参数张量 / 可训练参数 "
+                f"{n_train / 1e6:.2f}M (总计 {n_all / 1e6:.2f}M)，BN 保持 eval()"
+            )
+
+    def train(self, mode: bool = True):
+        """重写 train()：骨干冻结时强制其保持 eval()，避免 BN 统计漂移。"""
+        super().train(mode)
+        if getattr(self, 'freeze_backbone', False):
+            for module in (self.backbone, self.backbone_rgb):
+                if module is not None:
+                    module.eval()
+        return self
+
     # ------------------------------------------------------------------
     #  构建方法
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_resnet18(pretrained: bool):
+    def _build_resnet18(pretrained: bool, ckpt_path: str = None):
+        """构建 ResNet-18 骨干（到 layer4）。
+
+        ckpt_path（可选）: SSL 预训练权重，用于覆盖 ImageNet 初始化。
+          来源 = 可选的领域自监督（SSL）checkpoint；不提供时使用 ImageNet 初始化
+          state_dict；输入表示与训练严格一致（[u,v,u] 3 通道 + 同一归一化），
+          因此可原样注入、无需改结构。
+          键名前缀兼容 'encoder_q.' / 'encoder_k.' / 'module.' / 'backbone.'；
+          fc 层不匹配会被忽略（strict=False）。
+        """
         import torchvision.models as models
         weights = models.ResNet18_Weights.IMAGENET1K_V1 if pretrained else None
         resnet = models.resnet18(weights=weights)
+
+        if ckpt_path:
+            sd = torch.load(ckpt_path, map_location="cpu")
+            if isinstance(sd, dict):
+                # 兼容各种包装键：MoCo 预训练产物(state_dict) / 训练检查点(model_state_dict) 等
+                for wrap in ("state_dict", "model_state_dict", "model", "net", "weights"):
+                    if wrap in sd and isinstance(sd[wrap], dict):
+                        sd = sd[wrap]
+                        break
+            fixed = {}
+            for k, v in sd.items():
+                kk = k
+                for pre in ("module.", "encoder_q.", "encoder_k.", "backbone."):
+                    if kk.startswith(pre):
+                        kk = kk[len(pre):]
+                fixed[kk] = v
+            missing, unexpected = resnet.load_state_dict(fixed, strict=False)
+            n_loaded = len(fixed) - len(unexpected)
+            logger.info(f"[SSL] 注入光流分支 SSL 权重: {ckpt_path} "
+                        f"(匹配 {n_loaded} 个张量, 未使用 {len(unexpected)}, 缺失 {len(missing)})")
+            if n_loaded < 50:
+                logger.warning("[SSL] 权重匹配数过少，可能没生效，请检查键名/文件是否正确！")
+
         # 移除 avgpool + fc，保留到 layer4
         backbone = nn.Sequential(*list(resnet.children())[:-2])
         return backbone, 512
@@ -628,6 +714,13 @@ class BPTNet(nn.Module):
         if c == 3:
             return x
         elif c == 2:
+            # 2 通道光流 → 3 通道，以复用 ImageNet 预训练骨干
+            #   "dup"  (历史实现): [u, v, u] —— 第 3 通道是 u 的复制，几乎不增信息
+            #   "uvmag"          : [u, v, |flow|] —— 显式给出运动强度；幅值本身对
+            #                      微表情判别很关键（第一层卷积无法自行算出模长）
+            if getattr(self, "flow_3ch", "dup") == "uvmag":
+                mag = torch.sqrt(x[:, :1] ** 2 + x[:, 1:2] ** 2 + 1e-8)
+                return torch.cat([x, mag], dim=1)
             return torch.cat([x, x[:, :1]], dim=1)  # [B, 2, H, W] → [B, 3, H, W]
         elif c == 9:
             B, _, H, W = x.shape
@@ -760,7 +853,7 @@ class BPTNet(nn.Module):
                     spatial_feat = self.motion_fusion(f_oa, f_ao)
                     phase_feats = [f_oa, f_ao]
                 else:
-                    f_rgb = self._backbone_proj(rgb)
+                    f_rgb = self._backbone_proj(rgb, stream='rgb')
                     f_rgb = self._norm_feature(f_rgb)
                     if self.cbam is not None:
                         f_rgb = self.cbam(f_rgb)
@@ -780,7 +873,7 @@ class BPTNet(nn.Module):
             else:
                 # rgb_flow
                 rgb, flow = img
-                f_rgb  = self._backbone_proj(rgb)
+                f_rgb  = self._backbone_proj(rgb, stream='rgb')
                 f_flow = self._backbone_proj(flow)
                 f_rgb  = self._norm_feature(f_rgb)
                 f_flow = self._norm_feature(f_flow)
@@ -823,9 +916,20 @@ class BPTNet(nn.Module):
     #  单图特征提取（供 forward 复用，区分 triplet 多帧）
     # ------------------------------------------------------------------
 
-    def _backbone_proj(self, x: torch.Tensor) -> torch.Tensor:
-        """仅 backbone + 投影（不含 CBAM / 归一化），供多模态分支分步调用。"""
+    def _backbone_proj(self, x: torch.Tensor, stream: str = 'flow') -> torch.Tensor:
+        """仅 backbone + 投影（不含 CBAM / 归一化），供多模态分支分步调用。
+
+        Args:
+            stream: 'flow' → 使用 self.backbone；
+                    'rgb'  → 当 separate_backbone=True 时使用独立骨干
+                             self.backbone_rgb（避免与光流共享 BN 统计），
+                             否则回落到共享骨干。
+        """
         x = self._to_rgb_input(x)
+        if stream == 'rgb' and self.backbone_rgb is not None:
+            feat = self.backbone_rgb(x)
+            feat = self.proj_rgb(feat)
+            return feat
         feat = self.backbone(x)
         feat = self.proj(feat)
         return feat
@@ -836,6 +940,48 @@ class BPTNet(nn.Module):
         if apply_cbam is not None:
             feat = apply_cbam(feat)
         return feat
+
+    def extract_tokens(self, img: torch.Tensor) -> torch.Tensor:
+        """
+        复用 flow 单模态强骨干，返回 Transformer 编码后的 token 序列
+        （Head 之前），供外部相位引导模块（PSGM）叠加。
+
+        返回：[B, N+1+P, D]，其中 N=空间 patch 数, 1=CLS, P=相位 token 数
+              (flow 单模态 P=1，即 f_flow)。
+        注意：与 forward 的 flow 分支完全一致，只是不接 Head。
+        """
+        if img.shape[1] == 2:
+            img = self._to_rgb_input(img)
+        if self.frozen:
+            with torch.no_grad():
+                spatial_feat = self._extract_single(img, self.cbam)
+        else:
+            spatial_feat = self._extract_single(img, self.cbam)
+        phase_feats = [spatial_feat]
+        tokens = self.backbone(spatial_feat)
+        tokens = self.proj(tokens)
+        # 复用 _forward_transformer 到 Head 之前：手工展开其 token 构建逻辑
+        B, C, H, W = tokens.shape
+        if H != self.pos_embed.shape[2] or W != self.pos_embed.shape[3]:
+            pe = nn.functional.interpolate(
+                self.pos_embed, size=(H, W), mode='bilinear',
+                align_corners=False)
+        else:
+            pe = self.pos_embed
+        patches = tokens.flatten(2).transpose(1, 2)
+        pe = pe.flatten(2).transpose(1, 2)
+        patches = patches + pe
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        if self.use_phase_tokens and phase_feats:
+            P = len(phase_feats)
+            phase_tok = torch.stack(
+                [p.mean(dim=(-1, -2)) for p in phase_feats], dim=1)
+            phase_tok = phase_tok + self.phase_pos_embed[:, :P, :]
+            seq = torch.cat([cls_tokens, phase_tok, patches], dim=1)
+        else:
+            seq = torch.cat([cls_tokens, patches], dim=1)
+        # 不经 Head，直接返回 token 序列供 PSGM 使用
+        return seq
 
     def _norm_feature(self, x: torch.Tensor) -> torch.Tensor:
         """per-location LayerNorm over channel C：

@@ -155,7 +155,8 @@ def plot_and_save_confusion_matrix(
     class_names: List[str] = None,
     save_path: str = None,
     title: str = "Confusion Matrix",
-    normalize: bool = False
+    normalize: bool = False,
+    num_classes: int = None
 ) -> Optional[str]:
     """
     绘制并保存混淆矩阵可视化图
@@ -174,8 +175,9 @@ def plot_and_save_confusion_matrix(
     if class_names is None:
         class_names = [f'Class {i}' for i in range(len(set(gt)))]
     
-    # 计算混淆矩阵
-    cm = confusion_matrix(gt, pred)
+    # 计算混淆矩阵（固定维度，保证与 class_names 轴标签对齐且可跨折相加）
+    n = int(num_classes) if num_classes else len(class_names)
+    cm = confusion_matrix(gt, pred, labels=list(range(n)))
     
     if normalize:
         # 防止除以0：对于没有样本的行，设置为0
@@ -226,23 +228,30 @@ def plot_and_save_confusion_matrix(
         return None
 
 
-def compute_confusion_matrix(gt: List[int], pred: List[int], 
-                            class_names: List[str] = None) -> np.ndarray:
+def compute_confusion_matrix(gt: List[int], pred: List[int],
+                            class_names: List[str] = None,
+                            num_classes: int = None) -> np.ndarray:
     """
     计算混淆矩阵
-    
+
     Args:
         gt: 真实标签列表
         pred: 预测标签列表
         class_names: 类别名称列表
-        
+        num_classes: 类别总数。强烈建议传入 —— 见下方说明。
+
     Returns:
-        np.ndarray: 混淆矩阵
+        np.ndarray: 混淆矩阵（固定为 num_classes × num_classes）
     """
     if class_names is None:
         class_names = ['Negative', 'Positive', 'Surprise']
-    
-    cm = confusion_matrix(gt, pred)
+
+    # [!] 必须显式固定 labels=range(num_classes)。
+    # sklearn 默认只统计"本折实际出现过的标签"，于是 SAMM 5 类的某一折可能
+    # 只输出 4×4 矩阵；把各折矩阵直接相加做跨折汇总时行列会错位，
+    # pooled UF1/UAR 会被算错。固定维度后各折严格对齐。
+    n = int(num_classes) if num_classes else len(class_names)
+    cm = confusion_matrix(gt, pred, labels=list(range(n)))
     return cm
 
 
@@ -394,7 +403,8 @@ class Evaluator:
             raise ValueError("没有数据可以评估")
         
         uf1, uar, wf1 = calculate_uf1_uar(self.all_gt, self.all_pred, self.num_classes)
-        cm = compute_confusion_matrix(self.all_gt, self.all_pred, self.class_names)
+        cm = compute_confusion_matrix(self.all_gt, self.all_pred, self.class_names,
+                                      num_classes=self.num_classes)
         
         # 计算整体准确率
         accuracy = sum(1 for g, p in zip(self.all_gt, self.all_pred) 
@@ -452,6 +462,19 @@ ACC|UF1|UAR|WF1: {metrics['Accuracy']:.4f}  {metrics['UF1']:.4f}   {metrics['UAR
                 'split_mode': config.get('data.split_mode'),
                 'frame_type': config.get('data.frame_type'),
                 'exp_tag': _cfg_get(config, 'flag.exp_tag', ''),
+                # 按 run 分组统计 pooled 指标必须有这两个字段：
+                # metrics.jsonl 是**所有机器共享追加**的，只靠 dataset+frame_type
+                # 无法区分不同种子/不同变体的折（2026-09-24 补）。
+                'seed': config.get('base.seed'),
+                'run_name': config.get('base.name'),
+                # 逐折可溯源性（arm0，2026-09-25 补）：没有 test_subject 就无法把逐折混淆
+                # 矩阵归属到被试 → 无法做"被试级配对 bootstrap"（LOSO 的统计单位是被试而非
+                # 样本），也无法事后定位"半程 run 混池 / 同 tag 重跑重复追加"。
+                'test_subject': config.get('data.test_subject'),
+                'fold': config.get('flag.fold'),
+                # flag.eval 由 trainer 在 train()/test() 开头写入 → 可用它硬断言该批记录
+                # 全部来自正常训练路径（test-only 路径的字段集与训练路径完全相同，无法用其他字段区分）。
+                'eval_path': config.get('flag.eval'),
                 'phase_fusion': _cfg_get(config, 'model.phase_fusion'),
                 'use_phase_tokens': _cfg_get(config, 'model.use_phase_tokens'),
                 'transformer_layers': _cfg_get(config, 'model.transformer_layers'),
@@ -501,7 +524,7 @@ ACC|UF1|UAR|WF1: {metrics['Accuracy']:.4f}  {metrics['UF1']:.4f}   {metrics['UAR
                 class_names=self.class_names,
                 save_path=str(save_path),
                 title=f"{model_name} - {dataset_name}\n({flag_eval})",
-                normalize=False
+                normalize=False, num_classes=self.num_classes
             )
             
             # 归一化版本
@@ -512,7 +535,7 @@ ACC|UF1|UAR|WF1: {metrics['Accuracy']:.4f}  {metrics['UF1']:.4f}   {metrics['UAR
                 class_names=self.class_names,
                 save_path=norm_save_path,
                 title=f"{model_name} - {dataset_name}\n({flag_eval}, Normalized)",
-                normalize=True
+                normalize=True, num_classes=self.num_classes
             )
             
         except Exception as e:

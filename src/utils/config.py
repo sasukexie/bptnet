@@ -93,10 +93,11 @@ class ConfigManager:
 
         # 路径处理
         project_root = Path(__file__).parent.parent.parent
-        # 数据目录
+        workspace_root = project_root.parent                       # mer/ 层：共享数据集所在目录
+        # 数据目录：解析到 workspace_root/data_dir，使 mer/ 下的多个模型共用同一份数据集，节省磁盘空间
         data_dir = Path(config['data.data_dir'])
         if not data_dir.is_absolute():
-            config['data.data_dir'] = str(project_root / data_dir)
+            config['data.data_dir'] = str(workspace_root / data_dir)
             logger.debug(f"数据目录: {config['data.data_dir']}")
 
         # 数据集缓存文件
@@ -106,7 +107,7 @@ class ConfigManager:
         if 'annotation_data' in config['data']:
             annotation_data = Path(config['data.annotation_data'])
             if not annotation_data.is_absolute():
-                config['data.annotation_data'] = str(project_root / data_dir / annotation_data)
+                config['data.annotation_data'] = str(workspace_root / data_dir / annotation_data)
                 logger.debug(f"标注文件: {config['data.annotation_data']}")
 
         base_name = config['base.name']
